@@ -15,9 +15,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://gitee.com/Serius_117/pixelbar-one-look-public.git"
+    "url": "git+https://github.com/Serius117/pixelbar-one-look-public.git"
   },
-  "homepage": "https://gitee.com/Serius_117/pixelbar-one-look-public",
+  "homepage": "https://github.com/Serius117/pixelbar-one-look-public",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
