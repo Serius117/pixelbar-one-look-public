@@ -1,0 +1,64 @@
+{
+  "name": "pixelbar-one-look",
+  "version": "0.2.0",
+  "description": "opencode / DeepSeek Harness (dsh) 插件——把漫步者 Halo PixelBar LED 音箱变成 AI 编程助手状态灯。事件驱动、零 GPU、纯 Node。Turn your EDIFIER Halo PixelBar into a status light for AI coding agents (opencode & dsh).",
+  "keywords": [
+    "opencode-plugin",
+    "opencode",
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "pixelbar",
+    "status-light",
+    "led"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://gitee.com/Serius_117/pixelbar-one-look-public.git"
+  },
+  "homepage": "https://gitee.com/Serius_117/pixelbar-one-look-public",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./dsh": "./src/dsh-entry.ts"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run lint && npm test",
+    "check:mermaid": "node scripts/check-mermaid.ts",
+    "demo": "node tools/sim.ts",
+    "smoke": "node scripts/device-smoke.ts",
+    "smoke:scroll": "node scripts/device-smoke.ts --stage scroll --wait 15000",
+    "scenarios": "node scripts/device-scenarios.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "jsdom": "^31.0.1",
+    "mermaid": "^12.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "optionalDependencies": {
+    "node-hid": "^3.4.0"
+  }
+}

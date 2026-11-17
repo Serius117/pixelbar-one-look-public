@@ -1,0 +1,20 @@
+# pixelbar-one-look — dsh bundle 层
+# 激活机制：package.json 声明 "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }，
+# dsh 经 pnpm 安装本包后按声明挂载本层。
+# 条目形态（官方文档 develop/basic + 装载器源码实证 2026-11-17）：
+#   - 新插件必须包在 `- insert:` 列表（裸条目 = id 定向覆盖，id 不存在时整条被无视）
+#   - config 经 apply(ctx, config) 第二参数传入；变更触发插件热替换（HMR）
+#   - name 必须用子路径 'pixelbar-one-look/dsh'（装载器 unwrapExports 优先拆 default 导出——
+#     "."(index.ts) 的 default 是 opencode 形态 {id,setup} 无 apply → 静默装载失败；
+#     dsh-entry 无 default 导出，命名空间直供 Cordis 找 apply）
+# 安装：桌面 GUI「Add plugin」输入本地仓库绝对路径 / `dsh plugin add pixelbar-one-look`（npm 发布后）
+- insert:
+    - id: pixelbar-one-look
+      name: 'pixelbar-one-look/dsh'
+      config:
+        # 与 opencode PluginOptions 完全同构；未列字段用 dsh-entry.ts readOptions 默认值
+        # 注意 D19：同一台机器 + 同一台 PixelBar 只在一个宿主启用（dsh 与 opencode 二选一）
+        enabled: true
+        monitor: true
+        # monitorPort 缺省 18789；被占用时自动顺延（实测：测试 profile 占用时桌面实例落 18891）
+        # 标定/排障开关：debug（设备层日志进宿主 log）、logEvents（原始事件 JSONL+面板 diag 留痕）

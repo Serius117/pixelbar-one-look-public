@@ -1,0 +1,5 @@
+# temp — one-off scripts (gitignored)
+temp/
+node_modules/
+dist/
+*.log
