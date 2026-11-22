@@ -6,6 +6,10 @@
 
 **不只是红绿灯——是一台带 256×32 LED 文字屏的 PixelBar。** 其他状态灯方案最多给你三种颜色；PixelBar 的文字屏直接显示"哪个项目在等你"——真实文字，不只是颜色。
 
+![PixelBar 状态灯演示：空闲呼吸 → 执行中流光 → 完成涟漪](https://raw.githubusercontent.com/Serius117/pixelbar-one-look-public/master/assets/pixelbar-demo.gif)
+
+*演示项目：统计项目文件数量。呼吸灯 → 执行中流光 → 完成涟漪 + 文字（录屏已裁剪为设备画面，去除屏幕/音频/元数据）。*
+
 ## 灯效一览
 
 | agent 状态 | PixelBar |
