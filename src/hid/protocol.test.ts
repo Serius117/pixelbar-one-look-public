@@ -17,6 +17,7 @@ import {
   pixelStaticPayload,
   pixelThemePayload,
   textSetPayload,
+  textWidthPx,
 } from './protocol.ts'
 
 const A = 0x20 // 黄金样本的 arrayIndex（仅测试用；运行时必须 0x6A 查询——红线 1）
@@ -93,7 +94,7 @@ describe('crc8 与帧构造交叉验证', () => {
   })
 })
 
-describe('0xE8 textSetPayload 双限制（16 字符 / 48 UTF-8 字节）', () => {
+describe('0xE8 textSetPayload 字节上限（48 UTF-8 字节；PB.34b 实测）', () => {
   it('ASCII 文本', () => {
     expect([...textSetPayload('hello')]).toEqual([0x00, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f])
   })
@@ -102,26 +103,45 @@ describe('0xE8 textSetPayload 双限制（16 字符 / 48 UTF-8 字节）', () =>
     expect([...textSetPayload('')]).toEqual([0x00, 0x00])
   })
 
-  it('16 ASCII 恰好通过', () => {
-    expect(() => textSetPayload('a'.repeat(16))).not.toThrow()
+  it('17 ASCII 通过（字符数不再是限制）', () => {
+    expect(() => textSetPayload('a'.repeat(17))).not.toThrow()
   })
 
-  it('17 字符 → throw（字符限制）', () => {
-    expect(() => textSetPayload('a'.repeat(17))).toThrow(/16/)
+  it('48 ASCII 恰好通过（字节上限）', () => {
+    expect(() => textSetPayload('a'.repeat(48))).not.toThrow()
   })
 
-  it('16 个中文 = 48 字节恰好通过（双限制边界）', () => {
+  it('49 ASCII → throw（字节限制）', () => {
+    expect(() => textSetPayload('a'.repeat(49))).toThrow(/48/)
+  })
+
+  it('16 个中文 = 48 字节恰好通过（字节边界）', () => {
     const text = '一二三四五六七八九十一二三四五六' // 16 码点 × 3B
     expect([...text].length).toBe(16)
     expect(() => textSetPayload(text)).not.toThrow()
   })
 
-  it('17 个中文 → throw', () => {
-    expect(() => textSetPayload('一'.repeat(17))).toThrow()
+  it('17 个中文 = 51 字节 → throw（PB.34b 实测：18 个中文被设备截到 16 个）', () => {
+    expect(() => textSetPayload('一'.repeat(17))).toThrow(/48/)
   })
 
-  it('16 emoji = 64 字节 → 字节限制 throw（字符数合法）', () => {
+  it('16 emoji = 64 字节 → throw（字节限制）', () => {
     expect(() => textSetPayload('😀'.repeat(16))).toThrow(/48/)
+  })
+})
+
+describe('显示宽度估算（PB.34b：256px，中文 16px / ASCII 9px）', () => {
+  it('16 个中文 = 256px（正好填满）', () => {
+    expect(textWidthPx('一'.repeat(16))).toBe(256)
+  })
+
+  it('28 个 ASCII = 252px（放得下）；29 个 = 261px（超限→滚动）', () => {
+    expect(textWidthPx('0'.repeat(28))).toBe(252)
+    expect(textWidthPx('0'.repeat(29))).toBe(261)
+  })
+
+  it('pixelbar-one-look 完成 = 194px（静态放得下，不再截断）', () => {
+    expect(textWidthPx('pixelbar-one-look 完成')).toBe(194)
   })
 })
 

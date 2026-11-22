@@ -128,13 +128,34 @@ export interface DshNormalizer {
   (channel: string, args: readonly unknown[]): InternalEvent[]
 }
 
+export interface DshNormalizerOptions {
+  /** PB.33：turn 边界动态读取标题（dsh-entry 注入 ctx.sessionTitle.get()）——覆盖重启后
+   *  旧会话（log-only `session/title` 不补发）。返回 null/抛错一律静默。 */
+  resolveTitle?: (session: unknown) => string | null
+}
+
 /**
  * 归一化器工厂（闭包，非纯函数——打断兜底需要跨事件记忆）：
  * 内部维护「已见终态（完成/失败）」会话集合，agent/disposed 时判据其上（R2 Phase 1 形态）。
  * 纯函数版无法表达该依赖，故以工厂暴露（接口级偏差已在详细设计 §10.3 现状注记）。
  */
-export function createDshNormalizer(): DshNormalizer {
+export function createDshNormalizer(opts: DshNormalizerOptions = {}): DshNormalizer {
   const ended = new Set<string>()
+  /** PB.33：上次已知标题——turn 边界动态解析只在变化时补发 session.renamed */
+  const lastTitle = new Map<string, string>()
+
+  const resolveTitleEvents = (sid: string, session: unknown): InternalEvent[] => {
+    if (!opts.resolveTitle) return []
+    try {
+      const title = opts.resolveTitle(session)
+      if (!title || lastTitle.get(sid) === title) return []
+      lastTitle.set(sid, title)
+      return [{ type: 'session.renamed', sessionID: sid, title }]
+    } catch {
+      return [] // 铁律 1：宿主服务异常不影响主链
+    }
+  }
+
   return (channel, args) => {
     try {
       // 子 Agent 过滤（TC-DA3）：creator 非空一律不聚合
@@ -148,6 +169,7 @@ export function createDshNormalizer(): DshNormalizer {
       switch (channel) {
         case 'session/created': {
           const title = pickTitle(args)
+          if (title) lastTitle.set(sid, title)
           return [withP({ type: 'session.created', sessionID: sid, ...(title ? { title } : {}) })]
         }
         case 'session/event': {
@@ -161,11 +183,18 @@ export function createDshNormalizer(): DshNormalizer {
           switch (type) {
             case 'turn/start':
               // 每 turn 开始（用户提问→干活）——真 working 信号（agent/session-start 不随轮触发）
-              return [withP({ type: 'session.started', sessionID: sid })]
-            case 'turn/end':
+              // PB.33：先动态解析标题（重启后旧会话的 title 事件不会补发），再进 working
+              return [
+                ...resolveTitleEvents(sid, args[0]),
+                withP({ type: 'session.started', sessionID: sid }),
+              ]
+            case 'turn/end': {
               // 每 turn 结束——完成权威信号 + 终态登记（disposed 兜底判据）
+              const events = resolveTitleEvents(sid, args[0])
               ended.add(sid)
-              return [withP({ type: 'session.completed', sessionID: sid })]
+              events.push(withP({ type: 'session.completed', sessionID: sid }))
+              return events
+            }
             case 'step/start':
             case 'step/end':
             case 'tool/call':
@@ -178,6 +207,14 @@ export function createDshNormalizer(): DshNormalizer {
             case 'user/message':
               // 用户提交消息 = 用户在场（清完成队列；与 live inbox/claimed 双通道，engine 幂等）
               return [{ type: 'user.active', sessionID: sid, ...(project ? { project } : {}) }]
+            case 'session/title': {
+              // DSH 标题是 log-only `session/title`（data.title）；session/created 时通常还没有标题。
+              // 映射为 session.renamed，让台账别名从 S 序号升级为真实页签名（含手动改名）。
+              const title = str(data?.title)
+              if (!title) return []
+              lastTitle.set(sid, title)
+              return [{ type: 'session.renamed', sessionID: sid, title }]
+            }
             case 'approval/asked':
               // 审计对之一（log-only durable）——待批准灯效的正确来源
               return [withP({ type: 'permission.asked', sessionID: sid })]
@@ -243,8 +280,9 @@ export function attachDshEvents(
   ctx: DshEventCtx,
   emit: (e: InternalEvent) => void,
   onRaw?: (channel: string, args: readonly unknown[]) => void,
+  opts?: DshNormalizerOptions,
 ): () => void {
-  const normalize = createDshNormalizer()
+  const normalize = createDshNormalizer(opts)
   const offs: unknown[] = []
   let detached = false
 

@@ -7,19 +7,20 @@
  * - 窗口内刷新走 1s trailing 节流；pending 由 nextDeadline 暴露给宿主循环
  * - 清屏：窗口结束/text 熄灭时发 0xEF 时钟帧（D16 真机实测：设备**不会**自动恢复默认显示，
  *   停推后旧文字永驻——必须主动清）
- * - fitText 双线（D08）：>16 字符走 0xEF 滚动；>48 字节按字节安全截断（engine 已保状态词完整，此处兜底）
+ * - fitText（PB.34b）：48B 是设备硬限（超出按字节截断）；256px 是屏宽（超出默认滚动，不按字符截断）
  */
 import type { DeviceLogger, HidTransport } from '../hid/types.ts'
 import {
   CMD,
+  DISPLAY_WIDTH_PX,
   LIGHT,
-  TEXT_MAX_CHARS,
   TEXT_MAX_BYTES,
   moodSetPayload,
   pixelClockPayload,
   pixelScrollPayload,
   pixelStaticPayload,
   textSetPayload,
+  textWidthPx,
 } from '../hid/protocol.ts'
 import type { PixelBarDevice } from '../hid/device.ts'
 import type { Aggregate } from './states.ts'
@@ -80,20 +81,15 @@ const isRepeatable = (kind: Aggregate['kind']): boolean =>
   kind === 'waiting'
 
 /**
- * fitText 双线（D11 规格修正：0xE8 的 16 字符/48 字节均为协议硬线，"超长不截断"不可实现）：
- * - >16 字符：保头截断（working 的"工具 文件"头部语义重要）；scroll=true 用 0xEF 滚动模式做视觉强调
- * - >48 字节：按字节安全截断（不切半个字符）
- * - "别名 状态词"的尾部状态词保护在 engine compose 层完成（双预算截断别名）
+ * fitText（PB.34b 实测校准）：
+ * - 48 UTF-8 字节是设备硬上限（54B / 18 个中文实测被截到 16 字）→ 超出只能按字节安全截断；
+ * - 256px 是屏宽（中文≈16px、ASCII≈9px）→ 宽度超出**默认滚动**（0xEF scroll），不再按字符截断；
+ * - 16 字符只是全角字符的近似值，已废弃。
  */
 export function fitText(text: string): { out: string; scroll: boolean } {
   const enc = new TextEncoder()
-  const chars = [...text]
   let out = text
   let scroll = false
-  if (chars.length > TEXT_MAX_CHARS) {
-    out = chars.slice(0, TEXT_MAX_CHARS).join('')
-    scroll = true
-  }
   if (enc.encode(out).length > TEXT_MAX_BYTES) {
     const acc: string[] = []
     let bytes = 0
@@ -104,8 +100,9 @@ export function fitText(text: string): { out: string; scroll: boolean } {
       bytes += n
     }
     out = acc.join('')
-    scroll = true
+    scroll = true // 48B 硬上限：滚动也带不动超出的字节
   }
+  if (textWidthPx(out) > DISPLAY_WIDTH_PX) scroll = true // 宽度超限：滚动承载全文
   return { out, scroll }
 }
 

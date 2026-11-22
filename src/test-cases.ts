@@ -76,7 +76,7 @@ export const CASES: Record<string, TimelineCase> = {
     ],
     expect: [
       IDLE, FLOW,
-      RIPPLE, ST, 'TEXT "pixelbar-brid 完成"', // 13+1+2=16 字符，状态词完整（D13/D11 双线）
+      RIPPLE, ST, 'TEXT "pixelbar-bridge 完成"', // 15 ASCII×9 + 空格 + 完成 16×2 = 176px ≤256（PB.34b 宽度预算）
       IDLE, // @7s celebrating 结束涟漪转呼吸（text 相同不重发）
       CLK, // @9s user.active 清队 → idle 清屏（D16）
     ],
@@ -89,9 +89,9 @@ export const CASES: Record<string, TimelineCase> = {
       { atMs: 70_000, event: resolved('S1') },
     ],
     expect: [
-      IDLE, SHADOW, ST, 'TEXT "pixelbar-bri 待批准"',
+      IDLE, SHADOW, ST, 'TEXT "pixelbar-bridge 待批准"',
       CLK, // @10s 窗口结束 → 清屏
-      ST, 'TEXT "pixelbar-bri 待批准"', // @60s 周期重开
+      ST, 'TEXT "pixelbar-bridge 待批准"', // @60s 周期重开
       FLOW, // resolved → working 浮出（无文字，D13）
       CLK, // working 无文字 → 清掉上一窗口残留
     ],
@@ -104,7 +104,7 @@ export const CASES: Record<string, TimelineCase> = {
       { atMs: 65_000, event: tool('S1', 'Edit retry.ts', 'pixelbar-bridge') },
     ],
     expect: [
-      IDLE, SOLID_RED, ST, 'TEXT "pixelbar-brid 出错"',
+      IDLE, SOLID_RED, ST, 'TEXT "pixelbar-bridge 出错"',
       CLK, // @10s 窗口结束 → 清屏；D18：error 不重复
       FLOW, // 新事件回落（无文字；窗口已清，无需再清屏）
     ],
@@ -245,12 +245,12 @@ export const CASES: Record<string, TimelineCase> = {
     ],
   },
   'TC-D2': {
-    title: '超长项目名：compose 双预算截断至 ≤16 字符静态显示（D13/D11，状态词完整）',
+    title: '超长项目名：宽度超 256px → 0xEF 滚动承载全文（PB.34b，不再按字符截断）',
     endMs: 15_000,
     timeline: [{ atMs: 0, event: completed('S1', 'a-very-long-project-name') }],
     expect: [
       IDLE, RIPPLE,
-      ST, 'TEXT "a-very-long-p 完成"', // 25 字符项目名截 13，+完成=16 恰好（不再触发滚动）
+      SC, 'TEXT "a-very-long-project-name 完成"', // 25 字符名 + 完成 = 266px > 256 → 滚动，全文不截断
       IDLE, // @5s 涟漪转呼吸
       CLK, // @10s 窗口结束 → 清屏（D16）
     ],
@@ -267,7 +267,7 @@ export const CASES: Record<string, TimelineCase> = {
     ],
   },
   'TC-D5': {
-    title: '项目名正常拼接（≤16 字符直接显示）',
+    title: '项目名正常拼接（宽度内直接显示）',
     endMs: 5_000,
     timeline: [{ atMs: 0, event: completed('S1', 'demo-app') }],
     expect: [IDLE, RIPPLE, ST, 'TEXT "demo-app 完成"', IDLE],

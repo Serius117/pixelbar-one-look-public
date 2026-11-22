@@ -11,7 +11,9 @@
  *   npm run smoke -- --stage moods --hold 2500
  *   npm run smoke -- --stage text
  *   npm run smoke -- --stage restore      # 0xEF 时钟帧：把设备显示恢复到默认（清掉残留文字）
- *   npm run smoke -- --stage scroll        # D11 实验：>16 字符绕过护栏直发（观察滚动/截断/拒绝）
+ *   npm run smoke -- --stage scroll        # D11 实验：宽度超 256px 绕过护栏直发（观察滚动/截断/拒绝）
+ *   npm run smoke -- --stage digits        # PB.34 实验：16/40 位数字，实测屏幕可显示字符数
+ *   npm run smoke -- --stage cjk           # PB.34b 实验：中文数字/混合标题，实测像素宽度预算
  *   npm run smoke -- --no-restore          # 结束不恢复空闲呼吸
  *   npm run smoke -- --json                # 追加机器可读摘要
  *
@@ -58,7 +60,7 @@ interface Check {
   detail?: string
 }
 
-const STAGES = ['probe', 'open', 'moods', 'text', 'scroll', 'restore', 'all'] as const
+const STAGES = ['probe', 'open', 'moods', 'text', 'scroll', 'digits', 'cjk', 'restore', 'all'] as const
 type Stage = (typeof STAGES)[number]
 
 const TEXT_RGB: [number, number, number] = [0x1c, 0xff, 0xf8]
@@ -78,7 +80,7 @@ const MOOD_CYCLE: ReadonlyArray<{
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
-/** 刻意绕过 textSetPayload 的 16 字符护栏：D11 真机实验专用（观察设备对超长文本的行为） */
+/** 刻意绕过 textSetPayload 的 48B 护栏：PB.34 真机实验专用（观察设备对超长/超宽文本的行为） */
 function rawTextPayload(text: string): Uint8Array {
   const bytes = new TextEncoder().encode(text)
   if (bytes.length > 55) throw new Error(`raw text ${bytes.length}B exceeds 55B experiment limit`)
@@ -233,9 +235,9 @@ async function main(
 
   // ---------- scroll：D11 超长文本实验（用户命令触发：npm run smoke:scroll） ----------
   if (stage === 'scroll' && device) {
-    header('⑤ scroll — 0xEF 长文本实验（D11：设备对 >16 字符文本的真实行为）')
+    header('⑤ scroll — 0xEF 长文本实验（D11：设备对超宽文本的真实行为）')
     const longText = 'pixelbar-one-look 长文本滚动实验'
-    console.log(`  发送 ${[...longText].length} 字符 / ${new TextEncoder().encode(longText).length}B（刻意绕过 16 字符护栏）`)
+    console.log(`  发送 ${[...longText].length} 字符 / ${new TextEncoder().encode(longText).length}B（刻意绕过 48B 护栏）`)
     await device.sendFrame(CMD.PIXEL_SET, pixelScrollPayload(TEXT_RGB))
     await device.sendFrame(CMD.TEXT_SET, rawTextPayload(longText))
     textSent = true
@@ -243,6 +245,81 @@ async function main(
     await sleep(textWaitMs)
     check('0xEF 滚动实验帧已发送（结果需目视）', !device.closed)
     visual.push('长文本行为三选一：逐段滚动=支持 / 只显示前 16 字=截断 / 无反应=拒绝（记入 D11 → v0.2 卡）')
+  }
+
+  // ---------- digits：0xE8 文本实际可显示字符数（PB.34，用户命令触发：npm run smoke:digits） ----------
+  if (stage === 'digits' && device) {
+    header('⑥ digits — 0xE8 文本可显示字符数实测（数字逐位可数）')
+    const base16 = '0123456789012345' // 16 位基线：协议上限
+    const long40 = '0123456789012345678901234567890123456789' // 40 位：绕过护栏看设备真实行为
+    const per = Math.max(3_000, Math.floor(textWaitMs / 3))
+    console.log(`  三段各 ${(per / 1000).toFixed(1)}s；每段请记下屏幕显示到第几位数字（从 0 开始数）`)
+
+    // a) 16 位静态基线
+    await device.sendFrame(CMD.PIXEL_SET, pixelStaticPayload(TEXT_RGB, 1))
+    await device.sendFrame(CMD.TEXT_SET, textSetPayload(base16))
+    textSent = true
+    console.log(`  [a] 静态 16 位基线 "${base16}"——预期完整显示到 5（16 位）`)
+    await sleep(per)
+
+    // b) 40 位静态（绕过 48B 护栏）
+    await device.sendFrame(CMD.PIXEL_SET, pixelStaticPayload(TEXT_RGB, 1))
+    await device.sendFrame(CMD.TEXT_SET, rawTextPayload(long40))
+    console.log(`  [b] 静态 40 位 "${long40}"（绕过护栏）——看最后一位数字是几（16 位=5 / 20 位=9 …）`)
+    await sleep(per)
+
+    // c) 40 位滚动
+    await device.sendFrame(CMD.PIXEL_SET, pixelScrollPayload(TEXT_RGB))
+    await device.sendFrame(CMD.TEXT_SET, rawTextPayload(long40))
+    console.log('  [c] 滚动 40 位（0xEF 滚动模式）——看是否逐段滚动出现后续数字')
+    await sleep(per)
+
+    check('digits 实验帧已发送（显示位数需目视）', !device.closed)
+    visual.push(
+      'a) 16 位基线是否完整；b) 40 位静态实际显示到第几位；c) 40 位滚动是否逐段滚出后续数字',
+    )
+  }
+
+  // ---------- cjk：中文/混合文本像素宽度实测（PB.34b，用户命令触发：npm run smoke:cjk） ----------
+  if (stage === 'cjk' && device) {
+    header('⑦ cjk — 中文数字/混合标题宽度实测（校准 48B + 256px 预算）')
+    // 程序化截取，杜绝手数字符出错：CN 重复后按字符数截断
+    const CN = '零一二三四五六七八九'
+    const cn16 = [...(CN + CN)].slice(0, 16).join('') // 16 字符 = 48B（协议字节上限）
+    const cn18 = [...(CN + CN)].slice(0, 18).join('') // 18 字符 = 54B（在 55B 实验上限内）
+    // 真实痛点：17 个 ASCII + 空格 + 2 个中文 = 20 字符 / 24B；按宽度算应能放下
+    const mixed = 'pixelbar-one-look 完成'
+    const per = Math.max(3_000, Math.floor(textWaitMs / 3))
+    console.log(`  三段各 ${(per / 1000).toFixed(1)}s；请分别记录“最后一位中文数字”和是否在滚动`)
+    console.log(
+      `  字数校验：cn16=${[...cn16].length}字/${new TextEncoder().encode(cn16).length}B，` +
+        `cn18=${[...cn18].length}字/${new TextEncoder().encode(cn18).length}B，` +
+        `mixed=${[...mixed].length}字/${new TextEncoder().encode(mixed).length}B`,
+    )
+
+    // a) 16 个中文数字（48B）
+    await device.sendFrame(CMD.PIXEL_SET, pixelStaticPayload(TEXT_RGB, 1))
+    await device.sendFrame(CMD.TEXT_SET, rawTextPayload(cn16))
+    textSent = true
+    console.log(`  [a] 静态 16 个中文数字 "${cn16}"——最后一位应为"六"（第 16 位）`)
+    await sleep(per)
+
+    // b) 18 个中文数字（54B）
+    await device.sendFrame(CMD.PIXEL_SET, pixelStaticPayload(TEXT_RGB, 1))
+    await device.sendFrame(CMD.TEXT_SET, rawTextPayload(cn18))
+    console.log(`  [b] 静态 18 个中文数字 "${cn18}"——最后一位是"六"=16 / "七"=17 / "八"=18？`)
+    await sleep(per)
+
+    // c) 真实混合标题（20 字符 / 24B）
+    await device.sendFrame(CMD.PIXEL_SET, pixelStaticPayload(TEXT_RGB, 1))
+    await device.sendFrame(CMD.TEXT_SET, rawTextPayload(mixed))
+    console.log(`  [c] 静态混合标题 "${mixed}"（20 字符/24B）——是否完整显示到"完成"？`)
+    await sleep(per)
+
+    check('cjk 实验帧已发送（显示宽度需目视）', !device.closed)
+    visual.push(
+      'a) 16 个中文数字最后一位；b) 18 个中文数字最后一位；c) pixelbar-one-look 完成 是否完整显示（静止还是滚动）',
+    )
   }
 
   // ---------- 复位 + 收尾 ----------

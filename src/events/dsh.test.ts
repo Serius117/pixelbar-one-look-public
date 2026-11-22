@@ -44,6 +44,7 @@ describe('createDshNormalizer · dsh 通道映射（TC-DA1，PB.23 实测版）'
     ['session/event', sev('tool/call', { name: 'bash' }), { type: 'tool.started', sessionID: 'ses_1', text: 'bash' }],
     ['session/event', sev('step/start'), { type: 'tool.started', sessionID: 'ses_1', text: '执行中' }],
     ['session/event', sev('user/message'), { type: 'user.active', sessionID: 'ses_1' }],
+    ['session/event', sev('session/title', { title: '真实项目名', messageSeqs: [], source: { kind: 'user' } }), { type: 'session.renamed', sessionID: 'ses_1', title: '真实项目名' }],
     ['session/event', sev('approval/asked', { toolName: 'bash' }), { type: 'permission.asked', sessionID: 'ses_1' }],
     ['session/event', sev('approval/decided', { outcome: 'allowed-once' }), { type: 'permission.resolved', sessionID: 'ses_1' }],
     ['agent/session-start', [{ ...A, source: 'user' }], { type: 'session.started', sessionID: 'ses_1' }],
@@ -259,6 +260,55 @@ describe('引擎联动（TC-DA6 ~ DA10，跨 states.ts 断言）', () => {
     feed(n, engine, 'session/event', sev('turn/end'), 7000)
     feed(n, engine, 'agent/inbox/claimed', [A], 8000)
     expect(engine.stats().done).toEqual([])
+  })
+
+  it('TC-DA12 session/title 标题早到/晚到都落到完成别名（真实页签名，不是 S 序号）', () => {
+    // a) 标题在 turn/end 前到达：完成时直接取 title
+    const n1 = createDshNormalizer()
+    const e1 = new AggregationEngine()
+    feed(n1, e1, 'session/created', [{ session: { id: 'ses_1' } }], 1000)
+    feed(n1, e1, 'session/event', sev('session/title', { title: '浏览工作目录内容及作用' }), 1100)
+    feed(n1, e1, 'session/event', sev('turn/start'), 1200)
+    feed(n1, e1, 'session/event', sev('turn/end'), 1300)
+    expect(e1.stats().done[0]?.alias).toBe('浏览工作目录内容及作用')
+
+    // b) 标题在 turn/end 后才到达：完成队列已入队，仍回写为真实标题
+    const n2 = createDshNormalizer()
+    const e2 = new AggregationEngine()
+    feed(n2, e2, 'session/created', [{ session: { id: 'ses_1' } }], 1000)
+    feed(n2, e2, 'session/event', sev('turn/start'), 1100)
+    feed(n2, e2, 'session/event', sev('turn/end'), 1200)
+    expect(e2.stats().done[0]?.alias).toBe('S1')
+    feed(n2, e2, 'session/event', sev('session/title', { title: '安装 dsh-market' }), 1300)
+    const agg = e2.aggregate(1400)
+    expect(e2.stats().done[0]?.alias).toBe('安装 dsh-market')
+    expect(agg.kind === 'done' && agg.text).toBe('安装 dsh-market 完成')
+  })
+
+  it('PB.33 turn 边界动态解析标题：变化才发 session.renamed，同一标题不重复', () => {
+    let title = '手动改的名字'
+    const n = createDshNormalizer({ resolveTitle: () => title })
+    expect(n('session/event', sev('turn/start'))).toEqual([
+      { type: 'session.renamed', sessionID: 'ses_1', title: '手动改的名字' },
+      { type: 'session.started', sessionID: 'ses_1' },
+    ])
+    // turn/end 标题未变：不重复发 renamed
+    expect(n('session/event', sev('turn/end'))).toEqual([
+      { type: 'session.completed', sessionID: 'ses_1' },
+    ])
+    title = '又改了'
+    expect(n('session/event', sev('turn/start'))).toEqual([
+      { type: 'session.renamed', sessionID: 'ses_1', title: '又改了' },
+      { type: 'session.started', sessionID: 'ses_1' },
+    ])
+  })
+
+  it('PB.33 重启后旧会话：turn/start 动态取标题 → 完成别名正确', () => {
+    const n = createDshNormalizer({ resolveTitle: () => 'pixelbar-one-look' })
+    const e = new AggregationEngine()
+    feed(n, e, 'session/event', sev('turn/start'), 1000)
+    feed(n, e, 'session/event', sev('turn/end'), 2000)
+    expect(e.stats().done[0]?.alias).toBe('pixelbar-one-look')
   })
 })
 

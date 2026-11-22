@@ -10,7 +10,7 @@ import { MockTransport } from './hid/mock-device.ts'
 import { SILENT_LOGGER } from './hid/types.ts'
 import { moodResponseFrame } from './test-runner.ts'
 import { DSH_CHANNELS } from './events/dsh'
-import { apply, name, startPixelbar } from './dsh-entry'
+import { apply, name, readSessionTitle, readSessionTitles, startPixelbar } from './dsh-entry'
 
 const S = { id: 'ses_1' }
 const A = { agent: { session: S } }
@@ -166,6 +166,30 @@ describe('TC-DB5 模块导出形状（Cordis 插件契约）', () => {
     expect(name).toBe('pixelbar-one-look')
     expect(typeof apply).toBe('function')
     expect(typeof startPixelbar).toBe('function')
+  })
+})
+
+describe('TC-DB9 冷启动标题播种（PB.32：session/title 不补发）', () => {
+  it('sessions.list + sessionTitle.get → 只返回有标题的会话', () => {
+    const ctx = {
+      sessions: { list: () => [{ id: 's1' }, { id: 's2' }, { id: '' }] },
+      sessionTitle: {
+        get: (s: unknown) => ({ title: (s as { id?: string }).id === 's1' ? '真实页签名' : undefined }),
+      },
+    }
+    expect(readSessionTitles(ctx)).toEqual([{ id: 's1', title: '真实页签名' }])
+  })
+
+  it('服务缺失 / get 抛错 / 畸形 list → []（铁律 1，不影响插件装载）', () => {
+    expect(readSessionTitles({})).toEqual([])
+    expect(readSessionTitles({ sessions: { list: () => [] }, sessionTitle: { get: () => { throw new Error('boom') } } })).toEqual([])
+    expect(readSessionTitles({ sessions: { list: () => ({}) }, sessionTitle: { get: () => ({ title: 'x' }) } })).toEqual([])
+  })
+
+  it('readSessionTitle 单会话读取：有标题返回值，服务缺失/抛错返回 null（PB.33 动态兜底）', () => {
+    expect(readSessionTitle({ sessionTitle: { get: () => ({ title: '真实页签' }) } }, { id: 's1' })).toBe('真实页签')
+    expect(readSessionTitle({}, { id: 's1' })).toBeNull()
+    expect(readSessionTitle({ sessionTitle: { get: () => { throw new Error('boom') } } }, {})).toBeNull()
   })
 })
 

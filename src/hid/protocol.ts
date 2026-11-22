@@ -96,18 +96,43 @@ export function moodSetPayload(o: MoodSetOptions): Uint8Array {
 
 // ---------- 0xE8 文本 payload ----------
 
-export const TEXT_MAX_CHARS = 16
+/** 设备硬上限：UTF-8 48 字节（PB.34b 实测：54B / 18 个中文被截到 16 字 = 48B） */
 export const TEXT_MAX_BYTES = 48
+/** 屏宽实测（PB.34b）：256px；中文≈16px、ASCII≈9px（数字实测≈8.8px，取 9 保守） */
+export const DISPLAY_WIDTH_PX = 256
+export const CJK_WIDTH_PX = 16
+export const ASCII_WIDTH_PX = 9
 
-/** 推送文本；双限制（16 字符 / 48 UTF-8 字节）任一超出即 throw（协议红线 5） */
-export function textSetPayload(text: string): Uint8Array {
-  const chars = [...text].length
-  if (chars > TEXT_MAX_CHARS) {
-    throw new Error(`text ${chars} chars exceeds ${TEXT_MAX_CHARS} (protocol.md)`)
+/** 宽字符判定（CJK/假名/谚文/全角/emoji）——宽度预算用，不做字形渲染 */
+export function isWideChar(cp: number): boolean {
+  return (
+    (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+    (cp >= 0x2e80 && cp <= 0xa4cf) || // CJK 部首..Yi
+    (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul 音节
+    (cp >= 0xf900 && cp <= 0xfaff) || // CJK 兼容
+    (cp >= 0xfe30 && cp <= 0xfe4f) || // CJK 兼容形式
+    (cp >= 0xff00 && cp <= 0xff60) || // 全角
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1faff) || // emoji
+    (cp >= 0x20000 && cp <= 0x3fffd) // CJK 扩展 B+
+  )
+}
+
+/** 估算显示宽度（px）——只用于决定静态/滚动，不追求逐字形精确 */
+export function textWidthPx(text: string): number {
+  let px = 0
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0
+    px += isWideChar(cp) ? CJK_WIDTH_PX : ASCII_WIDTH_PX
   }
+  return px
+}
+
+/** 推送文本；设备硬上限 48 UTF-8 字节（宽度超限由调度层走 0xEF 滚动，不在此拒绝） */
+export function textSetPayload(text: string): Uint8Array {
   const utf8 = new TextEncoder().encode(text)
   if (utf8.length > TEXT_MAX_BYTES) {
-    throw new Error(`text ${utf8.length}B exceeds ${TEXT_MAX_BYTES} (protocol.md)`)
+    throw new Error(`text ${utf8.length}B exceeds ${TEXT_MAX_BYTES}B (protocol.md)`)
   }
   return Uint8Array.from([0x00, utf8.length, ...utf8])
 }
@@ -124,7 +149,7 @@ export function pixelStaticPayload(
   return Uint8Array.from([0x01, ...rgb, 0x00, 0x02, 0x00, align, 0xff])
 }
 
-/** 动态文本（右→左滚动，>16 字符用）：`01 R G B 00 02 01 01 FF` */
+/** 动态文本（右→左滚动，宽度 >256px 用）：`01 R G B 00 02 01 01 FF` */
 export function pixelScrollPayload(rgb: readonly [number, number, number]): Uint8Array {
   return Uint8Array.from([0x01, ...rgb, 0x00, 0x02, 0x01, 0x01, 0xff])
 }

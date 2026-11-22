@@ -87,8 +87,8 @@ describe('别名（D13：title→项目名→S 序号）', () => {
     const e = new AggregationEngine()
     e.apply(ev.asked('A', 'pixelbar-bridge'), 0)
     const agg = e.aggregate(1)
-    // 双预算：待批准 3 字 → 别名截 12 字符 + 空格 + 词 = 16 字符恰好（状态词完整）
-    expect(agg.kind === 'waiting' && agg.text).toBe('pixelbar-bri 待批准')
+    // PB.34b：不再按 16 字符截断；15 个 ASCII + 空格 + 待批准 = 192px ≤ 256（滚动由调度层判断）
+    expect(agg.kind === 'waiting' && agg.text).toBe('pixelbar-bridge 待批准')
   })
 
   it('title 优先于 project', () => {
@@ -102,10 +102,45 @@ describe('别名（D13：title→项目名→S 序号）', () => {
   it('session.renamed 事件 → 台账 title 更新（R3：GUI 页签重命名，别名随之变化）', () => {
     const e = new AggregationEngine()
     e.apply(ev.asked('A', 'pixelbar-bridge'), 0)
-    expect(e.aggregate(1).kind === 'waiting' && e.aggregate(1).text).toBe('pixelbar-bri 待批准')
+    expect(e.aggregate(1).kind === 'waiting' && e.aggregate(1).text).toBe('pixelbar-bridge 待批准')
     e.apply({ type: 'session.renamed', sessionID: 'A', title: '修复登录页CSS' }, 1)
     const agg = e.aggregate(2)
     expect(agg.kind === 'waiting' && agg.text).toBe('修复登录页CSS 待批准')
+  })
+
+  it('完成已入队后 session.renamed → 回写队列别名（标题晚于 turn/end 的场景）', () => {
+    const e = new AggregationEngine()
+    e.apply(ev.completed('A'), 0)
+    expect(e.stats().done[0]?.alias).toBe('S1')
+    e.apply({ type: 'session.renamed', sessionID: 'A', title: '安装 dsh-market' }, 1)
+    expect(e.stats().done[0]?.alias).toBe('安装 dsh-market')
+    const agg = e.aggregate(2)
+    expect(agg.kind === 'done' && agg.text).toBe('安装 dsh-market 完成')
+  })
+
+  it('完成删台账后手动改名：下一轮完成仍用新标题（PB.33）', () => {
+    const e = new AggregationEngine()
+    e.apply(ev.started('A'), 0)
+    e.apply(ev.completed('A'), 1) // 完成：台账删除，标题此前只存在台账里
+    e.apply({ type: 'session.renamed', sessionID: 'A', title: '安装插件' }, 2)
+    e.apply(ev.active(), 3) // 清完成队列：标题不能只活在 DoneEntry.alias 里
+    e.apply(ev.started('A'), 4) // 下一轮：台账重建
+    e.apply(ev.completed('A'), 5)
+    const agg = e.aggregate(5)
+    expect(agg.kind).toBe('done')
+    expect(agg.kind === 'done' && agg.text).toBe('安装插件 完成')
+  })
+
+  it('完成条目过期后再次执行：标题仍保留（PB.33）', () => {
+    const e = new AggregationEngine()
+    e.apply({ type: 'session.created', sessionID: 'A', title: '安装插件' }, 0)
+    e.apply(ev.completed('A'), 1)
+    const t = DONE_ENTRY_TTL_MS + 2
+    expect(e.aggregate(t).kind).toBe('idle') // 条目已过期
+    e.apply(ev.started('A'), t)
+    e.apply(ev.completed('A'), t + 1)
+    const agg = e.aggregate(t + 2)
+    expect(agg.kind === 'done' && agg.text).toBe('安装插件 完成')
   })
 
   it('completed 携带 project → 轮播别名用项目名', () => {

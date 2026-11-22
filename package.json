@@ -49,6 +49,8 @@
     "demo": "node tools/sim.ts",
     "smoke": "node scripts/device-smoke.ts",
     "smoke:scroll": "node scripts/device-smoke.ts --stage scroll --wait 15000",
+    "smoke:digits": "node scripts/device-smoke.ts --stage digits --wait 21000",
+    "smoke:cjk": "node scripts/device-smoke.ts --stage cjk --wait 21000",
     "scenarios": "node scripts/device-scenarios.ts"
   },
   "devDependencies": {

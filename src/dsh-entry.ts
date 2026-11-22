@@ -22,6 +22,10 @@ import type { Clock } from './clock.ts'
 
 export const name = 'pixelbar-one-look'
 
+/** Cordis 服务注入：读取已有会话标题需要 sessions + sessionTitle（PB.32 冷启动播种）。
+ *  仅声明 Host 服务；不 import cordis 类型，CI 仍零宿主依赖。 */
+export const inject = ['sessions', 'sessionTitle']
+
 /** 宿主注入 ctx 的最小形态（鸭子类型；运行时字段缺失/不可读时全部静默降级）
  * ⚠️ Cordis ctx 是 Proxy：未声明 inject 的服务属性【读取即抛错】（装载死因实证 2026-11-17：
  *    "cannot get property 'location' without inject"）——一切属性访问必须走 prop() 安全读取器 */
@@ -31,6 +35,8 @@ interface DshCtx {
   log?: { info?(msg: string): void; warn?(msg: string): void; error?(msg: string): void }
   location?: { directory?: unknown }
   cwd?: unknown
+  sessions?: { list?: () => unknown[] }
+  sessionTitle?: { get?: (session: unknown) => unknown }
 }
 
 /** 安全属性读取：宿主 Proxy 的 get 可能抛错（Cordis 服务属性需 inject）——抛错 = 视为不存在 */
@@ -50,6 +56,43 @@ export interface EntryHooks {
 
 const strOf = (v: unknown): string | null =>
   typeof v === 'string' && v.length > 0 ? v : null
+
+/** 冷启动读取已有会话标题（PB.32）：session/title 是 log-only 事件，插件启动前的标题不会补发；
+ *  通过 ctx.sessions.list() + ctx.sessionTitle.get(session) 播种，当前这一轮完成即可用真实页签名。
+ *  任何服务缺失/Proxy 读错/畸形都返回空数组（铁律 1）。 */
+export function readSessionTitles(ctx: unknown): Array<{ id: string; title: string }> {
+  try {
+    const sessions = prop(ctx, 'sessions') as DshCtx['sessions']
+    const titleSvc = prop(ctx, 'sessionTitle') as DshCtx['sessionTitle']
+    if (typeof sessions?.list !== 'function' || typeof titleSvc?.get !== 'function') return []
+    const list = sessions.list()
+    if (!Array.isArray(list)) return []
+    const out: Array<{ id: string; title: string }> = []
+    for (const session of list) {
+      const id = strOf(prop(session, 'id'))
+      if (!id) continue
+      const title = strOf(prop(titleSvc.get(session), 'title'))
+      if (title) out.push({ id, title })
+    }
+    return out
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 单会话标题读取（PB.33）：turn 边界动态兜底——服务缺失/Proxy 读错/畸形一律 null（铁律 1）。
+ * 覆盖「重启后旧会话的 log-only session/title 不会补发」：turn/start 时直接问标题服务。
+ */
+export function readSessionTitle(ctx: unknown, session: unknown): string | null {
+  try {
+    const titleSvc = prop(ctx, 'sessionTitle') as DshCtx['sessionTitle']
+    if (typeof titleSvc?.get !== 'function') return null
+    return strOf(prop(titleSvc.get(session), 'title'))
+  } catch {
+    return null
+  }
+}
 
 /**
  * 配置读取（官方文档 develop/basic/config 实测定案 2026-11-17）：
@@ -109,7 +152,7 @@ export function startPixelbar(ctx: DshCtx, config?: unknown, hooks: EntryHooks =
         }
       },
     })
-    const { diag, monitor, loop } = core
+    const { diag, engine, monitor, loop } = core
 
     // 实测校准通道（同 index.ts）：ctx 真实形态直接进面板——PB.23 标定的第一手数据
     const ctxKeys = Object.keys(ctx ?? {})
@@ -120,6 +163,11 @@ export function startPixelbar(ctx: DshCtx, config?: unknown, hooks: EntryHooks =
       diag('plugin disabled (enabled:false)')
       return
     }
+
+    // 冷启动播种已有标题（PB.32）：当前会话标题早于插件启动时，session/title 不会补发。
+    const seededTitles = readSessionTitles(ctx)
+    for (const { id, title } of seededTitles) engine.setSessionTitle(id, title)
+    if (seededTitles.length > 0) diag(`session title seed ${seededTitles.length}`)
 
     // 项目目录锚点（📌 PB.23）：location.directory（opencode 同源）?? cwd —— liveness/JSONL dump 落点
     // ⚠️ 经 prop() 安全读取（本次装载死因：ctx.location 直接读取抛 "without inject"）
@@ -178,7 +226,10 @@ export function startPixelbar(ctx: DshCtx, config?: unknown, hooks: EntryHooks =
       diag('NO ctx.on: zero subscriptions, lights stay idle')
     } else {
       // 窄化后显式装箱：DshEventCtx.on 必选 vs DshCtx.on 可选——TS 不对整对象收窄，取 const 再传
-      detach = attachDshEvents({ on }, emit, onRaw)
+      // PB.33：turn 边界动态读标题（重启后旧会话不补发 title 事件的兜底）
+      detach = attachDshEvents({ on }, emit, onRaw, {
+        resolveTitle: (session) => readSessionTitle(ctx, session),
+      })
     }
 
     // 生命周期托管（Cordis Effect）：init 返回 disposer，卸载/HMR 自动清场

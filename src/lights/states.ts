@@ -10,11 +10,13 @@
  * - nextDeadline 暴露聚合层时序：轮播切换 / 条目过期 / 涟漪 5s 转呼吸
  */
 import type { InternalEvent } from '../events/types.ts'
-import { TEXT_MAX_BYTES, TEXT_MAX_CHARS } from '../hid/protocol.ts'
+import { TEXT_MAX_BYTES } from '../hid/protocol.ts'
 
 export const DONE_RIPPLE_MS = 5_000
 export const DONE_ENTRY_TTL_MS = 10 * 60_000
 export const DONE_ROTATE_MS = 3_000
+/** 标题缓存上限（PB.33）：标题独立于会话台账存活，防止长期运行无限增长 */
+const TITLE_CACHE_LIMIT = 512
 
 export interface DoneEntry {
   sessionID: string
@@ -57,15 +59,13 @@ function truncateBytes(s: string, maxBytes: number): string {
 }
 
 /** 拼接 `别名 状态词`：状态词永远完整（D13/D11 双线硬保证）——
- *  别名同时受字符预算（16−词长−1，防 fitText 截头切词）与字节预算（48−词字节−1）约束 */
+ *  PB.34b：不再按 16 字符截别名（那是全角近似）；只保 48B 硬上限，
+ *  宽度超 256px 由调度层走 0xEF 滚动，不在这里截断。 */
 function compose(alias: string, stateWord: string): string {
-  const wordChars = [...stateWord].length
   const wordBytes = utf8Len(stateWord)
-  const charBudget = TEXT_MAX_CHARS - wordChars - 1
   const byteBudget = TEXT_MAX_BYTES - wordBytes - 1
-  if (charBudget <= 0 || byteBudget <= 0) return truncateBytes(stateWord, TEXT_MAX_BYTES)
-  let trimmed = truncateBytes(alias, byteBudget)
-  if ([...trimmed].length > charBudget) trimmed = [...trimmed].slice(0, charBudget).join('')
+  if (byteBudget <= 0) return truncateBytes(stateWord, TEXT_MAX_BYTES)
+  const trimmed = truncateBytes(alias, byteBudget)
   return `${trimmed} ${stateWord}`
 }
 
@@ -76,9 +76,14 @@ export class AggregationEngine {
   private nextSeq = 1
   private doneQueue: DoneEntry[] = []
   private lastDoneTs: number | null = null
+  /** 标题独立缓存（PB.33）：session.completed 会删台账，标题不能跟着丢——
+   *  否则手动改名/自动标题在下一轮 turn 重建台账后退化 S 序号 */
+  private titles = new Map<string, string>()
 
   /** 会话别名（D13）：title（会话名，v0.2 接线）→ 项目名 → S 序号兜底 */
   alias(id: string): string {
+    const remembered = this.titles.get(id)
+    if (remembered) return remembered
     const r = this.sessions.get(id)
     if (r?.title) return r.title
     if (r?.project) return r.project
@@ -86,8 +91,20 @@ export class AggregationEngine {
     return id
   }
 
+  /** 标题入独立缓存（LRU 式：重复写入移到末尾，超限淘汰最旧） */
+  private rememberTitle(id: string, title: string): void {
+    if (!title) return
+    this.titles.delete(id)
+    this.titles.set(id, title)
+    if (this.titles.size > TITLE_CACHE_LIMIT) {
+      const oldest = this.titles.keys().next().value
+      if (oldest !== undefined) this.titles.delete(oldest)
+    }
+  }
+
   /** 入口层发现会话标题时注入（事件携带或 session.list 兜底，PB.04 接线）；会话未建时预置 */
   setSessionTitle(id: string, title: string): void {
+    this.rememberTitle(id, title)
     const r = this.ensure(id, 0)
     r.title = title
   }
@@ -100,7 +117,10 @@ export class AggregationEngine {
     project?: string | null
   }): void {
     const r = this.ensure(info.id, 0)
-    if (info.title) r.title = info.title
+    if (info.title) {
+      this.rememberTitle(info.id, info.title)
+      r.title = info.title
+    }
     if (info.parentID !== undefined) r.parentID = info.parentID ?? null
     if (info.project) r.project = info.project
   }
@@ -116,7 +136,7 @@ export class AggregationEngine {
       r = {
         id,
         seq: this.nextSeq++,
-        title: null,
+        title: this.titles.get(id) ?? null,
         project: null,
         parentID: null,
         status: 'idle',
@@ -147,7 +167,10 @@ export class AggregationEngine {
         // v2：自动标题到达 + 子会话标记（session.list 播种的补充）
         const r = this.ensure(event.sessionID, now)
         remember(r)
-        if (event.title) r.title = event.title
+        if (event.title) {
+          this.rememberTitle(event.sessionID, event.title)
+          r.title = event.title
+        }
         if (event.parentID !== undefined) r.parentID = event.parentID
         break
       }
@@ -207,8 +230,14 @@ export class AggregationEngine {
       }
       case 'session.renamed': {
         // R3：GUI 页签重命名 → 台账 title（不动状态）；别名优先级 title→project→S（D13）
-        const r = this.ensure(event.sessionID, 0)
-        r.title = event.title
+        // PB.33：标题写入独立缓存——完成删台账后/下一轮重建台账时仍能取到，不再退 S 序号。
+        // 标题可能晚于 turn/end 到达：完成条目已入队时同步回写别名，避免锁死 S 序号。
+        this.rememberTitle(event.sessionID, event.title)
+        const r = this.sessions.get(event.sessionID)
+        if (r) r.title = event.title
+        for (const entry of this.doneQueue) {
+          if (entry.sessionID === event.sessionID) entry.alias = event.title
+        }
         break
       }
       case 'user.active': {
