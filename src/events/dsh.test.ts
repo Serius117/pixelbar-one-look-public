@@ -310,6 +310,34 @@ describe('引擎联动（TC-DA6 ~ DA10，跨 states.ts 断言）', () => {
     feed(n, e, 'session/event', sev('turn/end'), 2000)
     expect(e.stats().done[0]?.alias).toBe('pixelbar-one-look')
   })
+
+  it('PB.36 ask_user_question → permission.asked；tool/result 按 callId 配对 → permission.resolved', () => {
+    const n = createDshNormalizer()
+    const call = sev('tool/call', { name: 'ask_user_question', callId: 'call_q1', arguments: {} })
+    expect(n('session/event', call)).toEqual([{ type: 'permission.asked', sessionID: 'ses_1' }])
+    const result = sev('tool/result', { message: { role: 'tool', toolCallId: 'call_q1' } })
+    expect(n('session/event', result)).toEqual([{ type: 'permission.resolved', sessionID: 'ses_1' }])
+  })
+
+  it('PB.36 非提问的 tool/result 不会误清等待（callId 不匹配）', () => {
+    const n = createDshNormalizer()
+    n('session/event', sev('tool/call', { name: 'ask_user_question', callId: 'q1' }))
+    expect(n('session/event', sev('tool/result', { message: { toolCallId: 'other' } }))).toEqual([
+      { type: 'tool.started', sessionID: 'ses_1', text: '执行中' },
+    ])
+  })
+
+  it('PB.36 引擎联动：提问期间 waiting=1；回答后回 working', () => {
+    const n = createDshNormalizer()
+    const e = new AggregationEngine()
+    feed(n, e, 'session/created', [{ session: { id: 'ses_1', title: '确认清理' } }], 1000)
+    feed(n, e, 'session/event', sev('tool/call', { name: 'ask_user_question', callId: 'q1' }), 1100)
+    expect(e.stats()).toMatchObject({ waiting: 1, working: 0 })
+    const agg = e.aggregate(1200)
+    expect(agg.kind === 'waiting' && agg.text).toBe('确认清理 待批准')
+    feed(n, e, 'session/event', sev('tool/result', { message: { toolCallId: 'q1' } }), 1300)
+    expect(e.stats()).toMatchObject({ waiting: 0, working: 1 })
+  })
 })
 
 describe('onRaw 原始事件观察口（TC-DA11，PB.22 新增）', () => {

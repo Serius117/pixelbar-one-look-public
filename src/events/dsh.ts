@@ -143,6 +143,8 @@ export function createDshNormalizer(opts: DshNormalizerOptions = {}): DshNormali
   const ended = new Set<string>()
   /** PB.33：上次已知标题——turn 边界动态解析只在变化时补发 session.renamed */
   const lastTitle = new Map<string, string>()
+  /** PB.36：未回答的 ask_user_question 调用（callId）——tool/result 按 toolCallId 配对成 resolved */
+  const pendingQuestions = new Set<string>()
 
   const resolveTitleEvents = (sid: string, session: unknown): InternalEvent[] => {
     if (!opts.resolveTitle) return []
@@ -196,13 +198,39 @@ export function createDshNormalizer(opts: DshNormalizerOptions = {}): DshNormali
               return events
             }
             case 'step/start':
-            case 'step/end':
-            case 'tool/call':
-            case 'tool/result': {
+            case 'step/end': {
               // 工作活跃心跳（durable 流；live tools/result 双保险，重复心跳对 engine 无害）。
               // 工具失败 ≠ 会话失败（types.ts 失败两层哲学）
               const text = str(data?.name) ?? str(data?.toolName) ?? '执行中'
               return [withP({ type: 'tool.started', sessionID: sid, text: text.slice(0, 24) })]
+            }
+            case 'tool/call': {
+              // PB.36：ask_user_question 是「等用户决策」——不是普通工具心跳。
+              // DSH 没有独立的 question 事件，问题由 tool/call + tool/result 投影推导；
+              // 这里把调用映射为 permission.asked（waiting），回答时由 tool/result 配对 resolved。
+              const name = str(data?.name)
+              const callId = str(data?.callId)
+              if (name === 'ask_user_question') {
+                if (callId) pendingQuestions.add(callId)
+                return [withP({ type: 'permission.asked', sessionID: sid })]
+              }
+              return [
+                withP({
+                  type: 'tool.started',
+                  sessionID: sid,
+                  text: (name ?? '执行中').slice(0, 24),
+                }),
+              ]
+            }
+            case 'tool/result': {
+              // tool/result 的 message.toolCallId 与 tool/call.callId 配对；
+              // 命中未回答的提问 → permission.resolved（working），否则保持普通心跳语义。
+              const msg = asProps(data?.message)
+              const callId = str(msg?.toolCallId)
+              if (callId && pendingQuestions.delete(callId)) {
+                return [withP({ type: 'permission.resolved', sessionID: sid })]
+              }
+              return [withP({ type: 'tool.started', sessionID: sid, text: '执行中' })]
             }
             case 'user/message':
               // 用户提交消息 = 用户在场（清完成队列；与 live inbox/claimed 双通道，engine 幂等）

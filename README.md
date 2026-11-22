@@ -14,13 +14,23 @@
 
 | agent 状态 | PixelBar |
 |---|---|
-| 等你审批 | 🌊 动态光影 + `待批准` |
+| 等你审批/选择 | 🌊 动态光影 + `待批准` |
 | 执行任务中 | ✨ 流光逐影（纯灯效不刷屏，颜色会说话） |
 | 任务完成 | 🎉 涟漪庆祝 + `项目名 完成` |
 | 出错 | 🔴 常亮红灯 + `出错` |
 | 空闲 | 💤 呼吸灯 + 原生时钟 |
 
-多会话自动聚合——灯永远显示**最需要你关注**的那个会话。审批提醒每 60s 重复直到处理（这是唯一值得打断你的事）；完成/出错只显示 10 秒，之后自动回设备的默认显示（时钟/动图），不打扰。
+多会话自动聚合——灯永远显示**最需要你关注**的那个会话。等待决策（审批/选择）提醒每 60s 重复直到处理（这是唯一值得打断你的事）；完成/出错只显示 10 秒，之后自动回设备的默认显示（时钟/动图），不打扰。
+
+## 实拍
+
+**等你审批/选择**——动态光影 + `pixelbar-one-look 待批准`：
+
+![PixelBar 待批准实拍](docs/images/pixelbar-approval.jpg)
+
+**任务完成**——涟漪庆祝 + `pixelbar-one-look 完成`：
+
+![PixelBar 任务完成实拍](docs/images/pixelbar-done.jpg)
 
 ## 为什么选 PixelBar
 
@@ -62,7 +72,7 @@ opencode plugin add pixelbar-one-look
 
 ```sh
 npm install
-npm test                       # 167 项测试，无需硬件
+npm test                       # 195 项测试，无需硬件
 npm run demo -- --case TC-B2   # 终端虚拟 PixelBar
 npm run smoke                  # 真机冒烟（需 PixelBar 在场）
 ```

@@ -1,6 +1,6 @@
 {
   "name": "pixelbar-one-look",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "opencode / DeepSeek Harness (dsh) 插件——把漫步者 Halo PixelBar LED 音箱变成 AI 编程助手状态灯。事件驱动、零 GPU、纯 Node。Turn your EDIFIER Halo PixelBar into a status light for AI coding agents (opencode & dsh).",
   "keywords": [
     "opencode-plugin",
