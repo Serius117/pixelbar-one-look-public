@@ -89,7 +89,7 @@ describe('TC-DB1 全链起转：apply → 装配五件套 → idle 呼吸 → wo
   it('MockTransport 收到初始呼吸帧；agent/session-start 后收到 working 灯效帧', async () => {
     const ctx = mockDshCtx()
     const { transport, openDevice } = mockOpenDevice()
-    startPixelbar(ctx, { monitor: false }, { openDevice })
+    startPixelbar(ctx, { monitor: false, monitorFile: false }, { openDevice })
 
     await waitFor(() => transport.writes.length >= 1) // 初始 idle 呼吸上电
     const idleCount = transport.writes.length
@@ -111,7 +111,7 @@ describe('TC-DB2 铁律 1：宿主接口异常 → 静默降级，绝不抛进�
     ctx.on = () => {
       throw new Error('host quirk')
     }
-    expect(() => startPixelbar(ctx, { monitor: true, monitorPort: 18795 })).not.toThrow()
+    expect(() => startPixelbar(ctx, { monitor: true, monitorPort: 18795, monitorFile: false })).not.toThrow()
     expect(ctx.calls.length).toBe(0) // 全部注册失败被逐通道吞掉
 
     // diag 留痕：monitor 面板 /state（端口 18795，避开 18789-18793 既有用例）
@@ -131,7 +131,7 @@ describe('TC-DB3 生命周期：ctx.effect disposer → 退订 + 停泵 + 关设
   it('disposer 调用后：通道注销、再触发事件不产生新帧', async () => {
     const ctx = mockDshCtx()
     const { transport, openDevice } = mockOpenDevice()
-    startPixelbar(ctx, { monitor: false }, { openDevice })
+    startPixelbar(ctx, { monitor: false, monitorFile: false }, { openDevice })
     await waitFor(() => transport.writes.length >= 1)
     const cb = ctx.listeners.get('agent/session-start')! // 卸载前抓住 listener 引用
     const disposer = ctx.effectInits[0]!() as () => void
@@ -148,14 +148,14 @@ describe('TC-DB3 生命周期：ctx.effect disposer → 退订 + 停泵 + 关设
 describe('TC-DB4 enabled:false 空转', () => {
   it('scoped 配置块形态：零订阅、零托管、零上电', () => {
     const ctx = mockDshCtx()
-    startPixelbar(ctx, { 'pixelbar-one-look': { enabled: false } })
+    startPixelbar(ctx, { 'pixelbar-one-look': { enabled: false, monitorFile: false } })
     expect(ctx.calls).toEqual([])
     expect(ctx.effectInits).toEqual([])
   })
 
   it('扁平 config 形态（📌 PB.23 标定后收敛为一种）：同样空转', () => {
     const ctx = mockDshCtx()
-    startPixelbar(ctx, { enabled: false })
+    startPixelbar(ctx, { enabled: false, monitorFile: false })
     expect(ctx.calls).toEqual([])
     expect(ctx.effectInits).toEqual([])
   })
@@ -207,7 +207,7 @@ describe('TC-DB6 logEvents 标定通道（PB.23）', () => {
   it('logEvents: true → monitor /state 出现 raw 诊断行（无项目锚点也有 payload 形态）', async () => {
     const ctx = mockDshCtx()
     const { openDevice } = mockOpenDevice()
-    startPixelbar(ctx, { monitor: true, monitorPort: 18796, logEvents: true }, { openDevice })
+    startPixelbar(ctx, { monitor: true, monitorPort: 18796, logEvents: true, monitorFile: false }, { openDevice })
     ctx.listeners.get('agent/session-start')!({ agent: { session: { id: 'ses_cal' } } })
 
     await waitServer('http://127.0.0.1:18796/state')

@@ -26,6 +26,8 @@ export interface PluginOptions {
   /** 本地网页监视器（默认开启）：127.0.0.1:monitorPort 的虚拟 PixelBar 面板 */
   monitor?: boolean
   monitorPort?: number
+  /** 监视器持久化日志（默认开启）：事件流水落盘 <系统临时目录>/pixelbar-one-look/monitor-<日期>.jsonl（保留 3 天，跨重启不丢；排障用） */
+  monitorFile?: boolean
 }
 
 export interface AssembleHooks {
@@ -58,7 +60,9 @@ export function assembleCore(opts: PluginOptions, hooks: AssembleHooks = {}): As
 
   const engine = new AggregationEngine()
   const holder = new DeviceHolder(hooks.openDevice ?? (() => PixelBarDevice.open(logger)), logger)
-  const monitor = new MonitorHub()
+  // 文件日志默认开启（2026-11-18 用户反馈驱动：跨重启事件流水可回溯，定位问题不再依赖
+  // 内存环形缓冲——delta 不落盘，单日几 MB 级，保留 3 天）
+  const monitor = new MonitorHub(opts.monitorFile !== false)
   const diag = (msg: string): void => {
     try {
       monitor.pushDiag(msg)

@@ -65,6 +65,8 @@ npm run smoke                  # 真机冒烟（需 PixelBar 在场）
 
 Web 控制台：插件运行时在 `127.0.0.1:18789` 起一个实时面板——虚拟屏、灯效、会话统计、事件流水。
 
+排障：`/state?log=N` 可深取事件流水（最多 5000 条）；全量日志同时落盘 `<系统临时目录>/pixelbar-one-look/monitor-<日期>.jsonl`（保留 3 天，跨重启不丢，`monitorFile: false` 可关）。
+
 ## 文档
 
 - [docs/协议.md](docs/协议.md) — HID 协议（字节级逆向，含黄金向量与实施红线）

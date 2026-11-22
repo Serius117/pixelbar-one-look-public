@@ -4,10 +4,18 @@
  *
  * - TeeDevice：结构兼容 PixelBarDevice 的分发代理——帧同时进 monitor 记录和真机 HID（真机不存在时仅记录）
  * - HTTP：127.0.0.1:18789（可配）；GET / 面板页面，GET /state JSON 快照（页面 500ms 轮询）
+ *   /state?log=N 深度排障：最多取 LOG_LIMIT 条（2026-11-18 用户反馈"200 条太少、一天高强度
+ *   记录应存下"——xai 会话 form.created 被窗口挤掉险些断案，教训直接驱动本升级）
+ * - 增量流限流：reasoning/text .delta 事件每类 1 条/秒进日志（纯噪声，防止冲掉有意义事件）
+ * - 持久化 JSONL：跨重启不丢——<系统临时目录>/pixelbar-one-look/monitor-<日期>.jsonl（保留 3 天，
+ *   delta 不落盘；monitorFile 配置可关）
  * - noteRaw：记录原始事件的 type + location（事件 scope 实测：观察事件流是项目级还是全局级）
- * - 任何失败静默（铁律 1）：端口占用返回 false、渲染异常不影响输出
+ * - 任何失败静默（铁律 1）：端口占用返回 false、渲染/文件异常不影响输出
  */
 import { createServer, type Server } from 'node:http'
+import { appendFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { InternalEvent } from '../events/types.ts'
 import type { PixelBarDevice } from '../hid/device.ts'
 import { CMD, LIGHT } from '../hid/protocol.ts'
@@ -30,6 +38,11 @@ export interface LogEntry {
 
 const TEXT_WINDOW_MS = 10_000
 
+/** 环形缓冲上限（2026-11-18 扩容：200→5000——delta 限流后可覆盖数小时高强度记录） */
+const LOG_LIMIT = 5000
+/** 持久化日志保留天数 */
+const FILE_KEEP_DAYS = 3
+
 export class MonitorHub {
   private log: LogEntry[] = []
   private lastText: { text: string; t: number } | null = null
@@ -41,8 +54,69 @@ export class MonitorHub {
   /** 新实例接管端口时，旧实例收到的清理回调（宿主重载不调 cleanup 的兜底） */
   onShutdown: (() => void) | null = null
 
+  // ---- 持久化 JSONL（跨重启不丢；文件失败静默——铁律 1）----
+  private readonly fileLog: boolean
+  private readonly fileDir: string
+  private fileDay = ''
+  /** 增量流限流表：type → 上次记录时刻（.delta 事件每类 1 条/秒） */
+  private deltaLastTs = new Map<string, number>()
+
+  /** @param fileLog 是否落盘 JSONL（默认关；assembleCore 按配置开启——产品默认开） */
+  /** @param fileDir 落盘目录（默认系统临时目录/pixelbar-one-look；测试注入独立目录） */
+  constructor(fileLog = false, fileDir = join(tmpdir(), 'pixelbar-one-look')) {
+    this.fileLog = fileLog
+    this.fileDir = fileDir
+  }
+
   setStatsProvider(fn: () => unknown): void {
     this.statsProvider = fn
+  }
+
+  private push(entry: LogEntry, toFile = true): void {
+    this.log.push(entry)
+    if (this.log.length > LOG_LIMIT) this.log.splice(0, this.log.length - LOG_LIMIT)
+    if (this.fileLog && toFile) this.appendToFile(entry)
+  }
+
+  private appendToFile(entry: LogEntry): void {
+    try {
+      const day = new Date(entry.t).toISOString().slice(0, 10)
+      if (day !== this.fileDay) {
+        this.fileDay = day
+        this.pruneOldFiles(day)
+      }
+      mkdirSync(this.fileDir, { recursive: true })
+      appendFileSync(
+        join(this.fileDir, `monitor-${day}.jsonl`),
+        `${JSON.stringify(entry)}\n`,
+        'utf8',
+      )
+    } catch {
+      // 铁律 1：文件日志任何失败静默（磁盘满/权限等）
+    }
+  }
+
+  /** 保留最近 FILE_KEEP_DAYS 天的日志文件，更早的清理（在跨天首条写入时执行一次） */
+  private pruneOldFiles(today: string): void {
+    try {
+      const keep = new Set<string>()
+      const base = new Date(`${today}T00:00:00Z`).getTime()
+      for (let i = 0; i < FILE_KEEP_DAYS; i++) {
+        keep.add(new Date(base - i * 86_400_000).toISOString().slice(0, 10))
+      }
+      for (const f of readdirSync(this.fileDir)) {
+        const m = /^monitor-(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(f)
+        if (m && !keep.has(m[1]!)) {
+          try {
+            unlinkSync(join(this.fileDir, f))
+          } catch {
+            // 静默
+          }
+        }
+      }
+    } catch {
+      // 目录不存在等：静默
+    }
   }
 
   /**
@@ -121,8 +195,12 @@ export class MonitorHub {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
           res.end(PAGE)
         } else if (url.startsWith('/state')) {
+          // 深度排障口：/state?log=N（1..5000，默认 60）——面板不变，排障可拉全量环形缓冲
+          let logLimit = 60
+          const m = /[?&]log=(\d+)/.exec(url.slice('/state'.length))
+          if (m) logLimit = Number(m[1])
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify(this.snapshot()))
+          res.end(JSON.stringify(this.snapshot(logLimit)))
         } else {
           res.writeHead(404)
           res.end()
@@ -212,16 +290,24 @@ export class MonitorHub {
     this.push({ t: Date.now(), kind: 'event', line: brief.length > 200 ? `${brief.slice(0, 200)}…` : brief })
   }
 
-  /** 原始宿主事件观测：type + location（事件 scope 实测通道）；tool.called 附带完整 data（校准字段探取） */
+  /** 原始宿主事件观测：type + location（事件 scope 实测通道）；.delta 增量流每类 1 条/秒限流 */
   noteRaw(ev: unknown): void {
     const e = ev as { type?: unknown; location?: { directory?: unknown }; data?: unknown } | null
     if (!e || typeof e.type !== 'string') return
+    // 增量流限流：reasoning/text .delta 是高频纯噪声——每类每秒只记 1 条，且不落盘
+    const isDelta = e.type.endsWith('.delta')
+    if (isDelta) {
+      const now = Date.now()
+      const last = this.deltaLastTs.get(e.type) ?? 0
+      if (now - last < 1_000) return
+      this.deltaLastTs.set(e.type, now)
+    }
     const dir = typeof e.location?.directory === 'string' ? e.location.directory : ''
     let line = `${e.type}${dir ? ` @${dir}` : ''}`
-    if (e.type === 'session.tool.called' || e.type === 'permission.asked' || e.type === 'form.created' || e.type === 'form.replied') {
+    if (e.type === 'session.tool.called' || e.type === 'permission.asked' || e.type === 'form.created' || e.type === 'form.replied' || e.type === 'shell.created' || e.type === 'shell.exited' || e.type === 'shell.deleted' || e.type === 'session.usage.updated') {
       line += ` :: ${JSON.stringify(e.data ?? {}).slice(0, 400)}`
     }
-    this.push({ t: Date.now(), kind: 'raw', line })
+    this.push({ t: Date.now(), kind: 'raw', line }, !isDelta)
   }
 
   private recordFrame(cmd: number, payload: Uint8Array, suffix?: string): void {
@@ -246,12 +332,7 @@ export class MonitorHub {
     if (line) this.push({ t: Date.now(), kind: 'frame', line })
   }
 
-  private push(entry: LogEntry): void {
-    this.log.push(entry)
-    if (this.log.length > 200) this.log.splice(0, this.log.length - 200)
-  }
-
-  snapshot(): {
+  snapshot(logLimit = 60): {
     now: number
     text: { display: string; fresh: boolean; ageMs: number } | null
     effect: { name: string; rgb: [number, number, number]; ageMs: number } | null
@@ -278,7 +359,7 @@ export class MonitorHub {
       effect: this.lastEffect ? { ...this.lastEffect, ageMs: now - this.lastEffect.t } : null,
       monitorUrl: `http://127.0.0.1:${this.port}`,
       stats,
-      log: this.log.slice(-60),
+      log: this.log.slice(-Math.min(Math.max(1, logLimit), LOG_LIMIT)),
     }
   }
 }

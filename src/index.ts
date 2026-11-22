@@ -11,7 +11,7 @@
  * - cleanup 幂等：abort 订阅 + 停泵 + 关设备
  */
 import { assembleCore, type PluginOptions } from './assemble.ts'
-import { normalizeOpencodeEvent } from './events/opencode.ts'
+import { createOpencodeNormalizer } from './events/opencode.ts'
 import type { DeviceLogger } from './hid/types.ts'
 
 /**
@@ -102,6 +102,17 @@ async function setupImpl(ctx: HostCtx): Promise<() => Promise<void>> {
     return () => Promise.resolve()
   }
 
+  // 后台工作追踪（PB.31）：有状态归一化工厂——shell.created/exited 归属登记 +
+  // 抑制"轮次完成但后台脚本仍在跑"的 completed；宽限期到点经 onLate 补发
+  const norm = createOpencodeNormalizer({
+    onLate: (events) => {
+      for (const ie of events) {
+        monitor.noteEvent(ie)
+        loop.handleEvent(ie)
+      }
+    },
+  })
+
   const consuming = (async (): Promise<void> => {
     try {
       const stream = ctx.event?.subscribe?.({ signal: controller.signal })
@@ -119,7 +130,7 @@ async function setupImpl(ctx: HostCtx): Promise<() => Promise<void>> {
             // 写文件失败（目录不存在等）：静默——捕获模式绝不能影响宿主
           }
         }
-        for (const ie of normalizeOpencodeEvent(ev)) {
+        for (const ie of norm(ev)) {
           monitor.noteEvent(ie)
           loop.handleEvent(ie)
         }

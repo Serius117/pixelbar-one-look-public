@@ -3,7 +3,9 @@
  * 事件顶层 {type, data}（data 携带 sessionID 等载荷）。
  */
 import { describe, expect, it } from 'vitest'
-import { basename, normalizeOpencodeEvent } from './opencode'
+import { AggregationEngine } from '../lights/states'
+import { basename, createOpencodeNormalizer, normalizeOpencodeEvent } from './opencode'
+import type { InternalEvent } from './types'
 
 const ev = (type: string, data: unknown): { type: string; data: unknown } => ({ type, data })
 
@@ -171,5 +173,132 @@ describe('basename（D08 规则式浓缩）', () => {
     ['README.md', 'README.md'],
   ])('%s → %s', (input, expected) => {
     expect(basename(input)).toBe(expected)
+  })
+})
+
+describe('后台工作追踪（PB.31：轮次结束但后台脚本仍在跑 → 灯效保持执行中）', () => {
+  // 数据形态（持久化日志 2026-11-18 实测）：shell.created data={info:{id,metadata:{sessionID}}}；
+  // shell.exited/deleted data={id}
+  const shellCreated = (shId: string, sid: string) =>
+    ev('shell.created', { info: { id: shId, status: 'running', command: 'python job.py', metadata: { sessionID: sid } } })
+  const shellExited = (shId: string) => ev('shell.exited', { id: shId, exit: 0, status: 'exited' })
+  const shellDeleted = (shId: string) => ev('shell.deleted', { id: shId })
+  const succeeded = (sid: string) => ev('session.execution.succeeded', { sessionID: sid })
+  const started = (sid: string) => ev('session.execution.started', { sessionID: sid })
+  const interrupted = (sid: string) => ev('session.execution.interrupted', { sessionID: sid, reason: 'user' })
+
+  /** 手动调度注入：fire() 触发宽限到点 */
+  function manualClock() {
+    let fire: (() => void) | null = null
+    return {
+      schedule: (fn: () => void, _ms: number) => {
+        fire = fn
+        return () => {
+          if (fire === fn) fire = null
+        }
+      },
+      fire: () => {
+        const f = fire
+        fire = null
+        f?.()
+      },
+    }
+  }
+
+  it('后台 shell 存活时 succeeded 被抑制（灯效保持 working），completed 不发出', () => {
+    const late: InternalEvent[] = []
+    const n = createOpencodeNormalizer({ onLate: (e) => late.push(...e) })
+    expect(n(shellCreated('sh_1', 'ses_1'))).toEqual([]) // shell 事件本身不映射
+    expect(n(succeeded('ses_1'))).toEqual([]) // ★ 抑制：非 [session.completed]
+    expect(late).toEqual([])
+  })
+
+  it('最后一个后台 shell exited → 宽限到点 → onLate 补发 session.completed（引擎联动：完成入队）', () => {
+    const clock = manualClock()
+    const late: InternalEvent[] = []
+    const n = createOpencodeNormalizer({ schedule: clock.schedule, onLate: (e) => late.push(...e) })
+    const engine = new AggregationEngine()
+    const feedAll = (events: InternalEvent[]): void => {
+      for (const e of events) engine.apply(e, 1000)
+    }
+
+    n(shellCreated('sh_1', 'ses_1'))
+    feedAll(n(succeeded('ses_1')))
+    n(shellExited('sh_1'))
+    clock.fire()
+
+    expect(late).toEqual([{ type: 'session.completed', sessionID: 'ses_1' }])
+    feedAll(late) // index.ts 的 onLate 通路：补发事件进引擎
+    expect(engine.stats().done.length).toBe(1) // ★ 完成队列最终入账
+  })
+
+  it('宽限期内宿主通知唤醒（started 到达）→ 取消补发完成（无涟漪闪烁）', () => {
+    const clock = manualClock()
+    const late: InternalEvent[] = []
+    const n = createOpencodeNormalizer({ schedule: clock.schedule, onLate: (e) => late.push(...e) })
+    n(shellCreated('sh_1', 'ses_1'))
+    n(succeeded('ses_1'))
+    n(shellExited('sh_1'))
+    expect(n(started('ses_1'))).toEqual([{ type: 'session.started', sessionID: 'ses_1' }]) // 正常唤醒
+    clock.fire()
+    expect(late).toEqual([]) // ★ 宽限取消：不补发完成
+  })
+
+  it('前台 shell（轮次结束前已 exited）→ succeeded 正常映射 completed，不抑制', () => {
+    const late: InternalEvent[] = []
+    const n = createOpencodeNormalizer({ onLate: (e) => late.push(...e) })
+    n(shellCreated('sh_1', 'ses_1'))
+    n(shellExited('sh_1')) // 前台：轮次内跑完退出
+    n(shellDeleted('sh_1'))
+    expect(n(succeeded('ses_1'))).toEqual([{ type: 'session.completed', sessionID: 'ses_1' }])
+    expect(late).toEqual([])
+  })
+
+  it('打断（interrupted）撤销抑制 → shell 排空后不补发完成（D13 不庆祝不通知）', () => {
+    const clock = manualClock()
+    const late: InternalEvent[] = []
+    const n = createOpencodeNormalizer({ schedule: clock.schedule, onLate: (e) => late.push(...e) })
+    n(shellCreated('sh_1', 'ses_1'))
+    n(succeeded('ses_1'))
+    expect(n(interrupted('ses_1'))).toEqual([{ type: 'session.abandoned', sessionID: 'ses_1' }])
+    n(shellExited('sh_1'))
+    clock.fire()
+    expect(late).toEqual([]) // ★ 打断后不再补发
+  })
+
+  it('多后台 shell：仅一个退出不触发；全部排空才补发', () => {
+    const clock = manualClock()
+    const late: InternalEvent[] = []
+    const n = createOpencodeNormalizer({ schedule: clock.schedule, onLate: (e) => late.push(...e) })
+    n(shellCreated('sh_1', 'ses_1'))
+    n(shellCreated('sh_2', 'ses_1'))
+    n(succeeded('ses_1'))
+    n(shellExited('sh_1'))
+    clock.fire() // sh_2 还活着：即便 fire 也不该有 pending 计划外触发——此时根本没排计时
+    expect(late).toEqual([])
+    n(shellExited('sh_2'))
+    clock.fire()
+    expect(late).toEqual([{ type: 'session.completed', sessionID: 'ses_1' }])
+  })
+
+  it('畸形 shell 事件 → 静默忽略不抛；后续 succeeded 不受影响', () => {
+    const late: InternalEvent[] = []
+    const n = createOpencodeNormalizer({ onLate: (e) => late.push(...e) })
+    expect(n(ev('shell.created', null))).toEqual([])
+    expect(n(ev('shell.created', {}))).toEqual([])
+    expect(n(ev('shell.exited', {}))).toEqual([])
+    expect(n(ev('shell.exited', { id: 'sh_unknown' }))).toEqual([]) // 未登记的 shell
+    expect(n(succeeded('ses_1'))).toEqual([{ type: 'session.completed', sessionID: 'ses_1' }]) // 正常
+    expect(late).toEqual([])
+  })
+
+  it('纯函数版行为保持不变（无 shell 场景下工厂与裸函数等价）', () => {
+    const n = createOpencodeNormalizer()
+    expect(n(ev('permission.asked', { sessionID: 'ses_1' }))).toEqual(
+      normalizeOpencodeEvent(ev('permission.asked', { sessionID: 'ses_1' })),
+    )
+    expect(n(ev('session.tool.called', { sessionID: 'ses_1', id: 'c1', input: { command: 'npm test' } }))).toEqual(
+      normalizeOpencodeEvent(ev('session.tool.called', { sessionID: 'ses_1', id: 'c1', input: { command: 'npm test' } })),
+    )
   })
 })

@@ -204,3 +204,116 @@ export function normalizeOpencodeEvent(ev: unknown): InternalEvent[] {
   }
   return out
 }
+
+// ---- v0.3 · 后台工作追踪（PB.31，2026-11-18）----
+// 场景（用户实测）：agent 用 background:true 拉起脚本 → 轮次结束（execution.succeeded）
+// 但脚本仍在后台跑 → 完成后通知 session（唤醒新回合）。此前灯效会在轮次结束就切"完成"——误导。
+// 数据形态（持久化日志实证）：shell.created data={info:{id,status,command,metadata:{sessionID}}}；
+//   shell.exited/deleted data={id}（只有 shell id，经 created 的映射配对归属会话）。
+// 策略：succeeded 时若该会话仍有活跃 shell → 抑制 completed（引擎 working 态无时间衰减，
+//   灯效自然保持流光）；最后一个 shell exited → 宽限期（防"涟漪→唤醒"闪烁）后 onLate 补发
+//   completed；宽限期内 started/inbox 到达（宿主通知唤醒）→ 取消补发；interrupted → 撤销抑制。
+
+export interface OpencodeNormalizerOptions {
+  /** 排空后补发完成的宽限期；默认 3000ms */
+  graceMs?: number
+  /** 定时注入（测试用手动调度）；返回取消函数。默认 setTimeout */
+  schedule?: (fire: () => void, ms: number) => () => void
+  /** 宽限到点后延迟事件的出口（index.ts 接 monitor.noteEvent + loop.handleEvent） */
+  onLate?: (events: InternalEvent[]) => void
+}
+
+export interface OpencodeNormalizer {
+  (ev: unknown): InternalEvent[]
+}
+
+export function createOpencodeNormalizer(opts: OpencodeNormalizerOptions = {}): OpencodeNormalizer {
+  const graceMs = opts.graceMs ?? 3000
+  const schedule =
+    opts.schedule ??
+    ((fire: () => void, ms: number) => {
+      const t = setTimeout(fire, ms)
+      return () => clearTimeout(t)
+    })
+
+  /** 活跃 shell：shellId → sessionID（created 登记；exited/deleted 注销） */
+  const liveShells = new Map<string, string>()
+  /** 抑制完成的会话：sessionID → project（排空补发时保留别名兜底链） */
+  const pendingDone = new Map<string, string | undefined>()
+  /** 宽限计时器：sessionID → 取消函数 */
+  const graceCancels = new Map<string, () => void>()
+
+  const liveCount = (sid: string): number => {
+    let n = 0
+    for (const s of liveShells.values()) if (s === sid) n++
+    return n
+  }
+
+  return (ev) => {
+    try {
+      const e = ev as OpencodeEventLike | null
+      if (!e || typeof e.type !== 'string') return []
+      const d = (e.data ?? e.properties ?? {}) as Props
+
+      // ---- shell 生命周期登记（基础归一化不映射 shell 事件，本工厂独占）----
+      if (e.type === 'shell.created') {
+        const info = (d.info ?? {}) as Props
+        const meta = (info.metadata ?? {}) as Props
+        const id = str(info.id)
+        const sid = str(meta.sessionID)
+        if (id && sid) liveShells.set(id, sid)
+        return []
+      }
+      if (e.type === 'shell.exited' || e.type === 'shell.deleted') {
+        const id = str(d.id)
+        if (id) {
+          const sid = liveShells.get(id) ?? null // 先取归属，再注销
+          liveShells.delete(id)
+          // 最后一个后台 shell 排空 且 完成被抑制中 → 进宽限期（到点无人唤醒则补发完成）
+          if (e.type === 'shell.exited' && sid && pendingDone.has(sid) && liveCount(sid) === 0) {
+            scheduleDone(sid)
+          }
+        }
+        return []
+      }
+
+      // ---- 基础事件路径的三个挂钩点 ----
+      const sid = pickSessionID(d)
+      if (e.type === 'session.execution.succeeded' && sid) {
+        if (liveCount(sid) > 0) {
+          // 轮次结束但后台 shell 仍在跑：抑制完成（灯效保持 working），登记待排空补发
+          pendingDone.set(sid, pickProject(e))
+          return []
+        }
+      }
+      if (sid && (e.type === 'session.execution.started' || e.type === 'session.inbox.enqueued')) {
+        // 宿主通知唤醒（后台脚本完成 → 通知 session → 新回合）：撤销抑制，正常走基础映射
+        if (pendingDone.delete(sid)) graceCancels.get(sid)?.()
+        graceCancels.delete(sid)
+      }
+      if (e.type === 'session.execution.interrupted' && sid) {
+        // 打断撤销抑制：不庆祝不通知（D13）；后续 shell 排空也不再补发
+        if (pendingDone.delete(sid)) graceCancels.get(sid)?.()
+        graceCancels.delete(sid)
+      }
+      return normalizeOpencodeEvent(ev)
+    } catch {
+      return [] // 铁律 1：任何畸形绝不外抛
+    }
+  }
+
+  function scheduleDone(sid: string): void {
+    graceCancels.get(sid)?.() // 多 shell 交错退出时重开计时
+    const project = pendingDone.get(sid)
+    const cancel = schedule(() => {
+      graceCancels.delete(sid)
+      if (pendingDone.has(sid) && liveCount(sid) === 0) {
+        pendingDone.delete(sid)
+        opts.onLate?.([
+          { type: 'session.completed', sessionID: sid, ...(project ? { project } : {}) },
+        ])
+      }
+    }, graceMs)
+    graceCancels.set(sid, cancel)
+  }
+}

@@ -117,16 +117,72 @@ describe('HTTP 面板', () => {
 })
 
 describe('事件日志', () => {
-  it('noteEvent/noteRaw 入日志并裁剪到 200 条', () => {
+  it('noteEvent/noteRaw 入日志并裁剪到 5000 条（2026-11-18 扩容：200→5000）', () => {
     const hub = new MonitorHub()
-    for (let i = 0; i < 250; i++) {
+    for (let i = 0; i < 5000 + 50; i++) {
       hub.noteEvent({ type: 'tool.started', sessionID: 's', text: `t${i}` })
     }
     hub.noteRaw({ type: 'session.idle', location: { directory: 'D:\\proj' } })
-    const log = (hub.snapshot() as unknown as { log: Array<{ kind: string; line: string }> }).log
-    expect(log.length).toBeLessThanOrEqual(200)
+    const log = (hub.snapshot(5000) as unknown as { log: Array<{ kind: string; line: string }> }).log
+    expect(log.length).toBe(5000)
     const raw = log.filter((l) => l.kind === 'raw')
     expect(raw[raw.length - 1].line).toContain('session.idle')
     expect(raw[raw.length - 1].line).toContain('proj')
+  })
+
+  it('.delta 增量流限流：每类每秒仅 1 条（防 reasoning/text 流冲掉有意义事件）', () => {
+    const hub = new MonitorHub()
+    for (let i = 0; i < 100; i++) {
+      hub.noteRaw({ type: 'session.reasoning.delta', location: { directory: 'D:\\proj' } })
+      hub.noteRaw({ type: 'session.text.delta', location: { directory: 'D:\\proj' } })
+    }
+    const log = (hub.snapshot() as unknown as { log: Array<{ kind: string; line: string }> }).log
+    const deltas = log.filter((l) => l.line.includes('.delta'))
+    // 100 轮同毫秒：每类只留首条
+    expect(deltas.length).toBe(2)
+    expect(deltas.filter((l) => l.line.includes('reasoning.delta')).length).toBe(1)
+    expect(deltas.filter((l) => l.line.includes('text.delta')).length).toBe(1)
+  })
+
+  it('/state?log=N 深度排障口：默认 60，可取到 5000', async () => {
+    const hub = new MonitorHub()
+    started.push(hub)
+    expect(await hub.start(18798)).toBe(true)
+    for (let i = 0; i < 80; i++) {
+      hub.noteEvent({ type: 'tool.started', sessionID: 's', text: `t${i}` })
+    }
+    const def = (await (await fetch('http://127.0.0.1:18798/state')).json()) as { log: unknown[] }
+    expect(def.log.length).toBe(60)
+    const deep = (await (await fetch('http://127.0.0.1:18798/state?log=80')).json()) as { log: unknown[] }
+    expect(deep.log.length).toBe(80)
+    const over = (await (await fetch('http://127.0.0.1:18798/state?log=99999')).json()) as { log: unknown[] }
+    expect(over.log.length).toBeLessThanOrEqual(80) // 上限钳制到缓冲实有量
+  })
+
+  it('持久化 JSONL：事件落盘 monitor-<日期>.jsonl，delta 不落盘，可配置关闭', async () => {
+    const { mkdtempSync, readdirSync, readFileSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = mkdtempSync(join(tmpdir(), 'pb-test-'))
+    try {
+      const hub = new MonitorHub(true, dir)
+      hub.noteEvent({ type: 'tool.started', sessionID: 's', text: '落盘验证' })
+      hub.noteRaw({ type: 'session.reasoning.delta', location: { directory: 'D:\\proj' } })
+      hub.noteRaw({ type: 'form.created', data: { form: { id: 'f1' } } })
+      // 文件写入是同步 appendFileSync：立即可读
+      const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'))
+      expect(files.length).toBe(1)
+      const lines = readFileSync(join(dir, files[0]!), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { kind: string; line: string })
+      expect(lines.some((l) => l.kind === 'event' && l.line.includes('落盘验证'))).toBe(true)
+      expect(lines.some((l) => l.kind === 'raw' && l.line.includes('form.created'))).toBe(true)
+      expect(lines.some((l) => l.line.includes('.delta'))).toBe(false) // 增量流不落盘
+      // 关闭开关：不写
+      const off = new MonitorHub(false, dir)
+      off.noteEvent({ type: 'tool.started', sessionID: 's', text: '不应落盘' })
+      const content = readFileSync(join(dir, files[0]!), 'utf8')
+      expect(content.includes('不应落盘')).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
