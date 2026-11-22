@@ -8,7 +8,7 @@
 
 ![PixelBar 状态灯演示：空闲呼吸 → 执行中流光 → 完成涟漪](https://raw.githubusercontent.com/Serius117/pixelbar-one-look-public/master/assets/pixelbar-demo.gif)
 
-*演示项目：统计项目文件数量。呼吸灯 → 执行中流光 → 完成涟漪 + 文字（录屏已裁剪为设备画面，去除屏幕/音频/元数据）。*
+*演示项目：统计项目文件数量。呼吸灯 → 执行中流光 → 完成涟漪 + 文字。*
 
 ## 灯效一览
 
